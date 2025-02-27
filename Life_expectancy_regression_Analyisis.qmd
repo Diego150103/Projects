@@ -1,0 +1,567 @@
+---
+title: "Regression Project (Life Expectancy) (Code)"
+subtitle: Math 4387/5387 Applied Regression Analysis
+format:
+  html:
+    code-tools: true
+    self-contained: true
+author: Diego Garza Valdez
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Exploratory Data Analysis
+
+```{r, include = FALSE}
+
+library(dplyr)
+library(ggplot2)
+library(leaps)
+library(caret)
+library(car)
+library(lmtest)
+library(api2lm)
+library(alr4)
+library(effects)
+
+```
+
+```{r}
+life_exp_raw<- read.csv("https://raw.githubusercontent.com/Diego150103/Regression/refs/heads/main/Life_Expectancy.csv")
+```
+
+```{r}
+life_exp_clean <- 
+  life_exp_raw |>
+  subset(Year == 2015,select = c("Country", "Life.expectancy", "Adult.Mortality",
+                                 "BMI", "GDP", "Schooling", "HIV.AIDS",
+                                 "Population", "Status"))
+  
+```
+
+```{r}
+summary(life_exp_clean)
+```
+
+```{r}
+life_exp_clean <-
+  life_exp_clean |>
+  transform(Status = factor(Status))
+```
+
+```{r}
+summary(life_exp_clean)
+```
+
+```{r}
+names(life_exp_clean) <- c("Country",
+                           "life_expectancy",
+                           "adult_mortality",
+                           "BMI",
+                           "GDP",
+                           "Schooling",
+                           "HIV_AIDS", 
+                           "Population",
+                           "Status")
+```
+
+```{r}
+summary(life_exp_clean)
+```
+
+### Final Selected Variables
+
+| Variable | Description | Type |
+|----|----|----|
+| `life_expectancy` | Average life expectancy at birth (years) | Numeric |
+| `adult_Mortality` | Adult mortality rate per 1000 individuals | Numeric |
+| `BMI` | Average Body Mass Index | Numeric |
+| `GDP` | Gross Domestic Product per capita (USD per year) | Numeric |
+| `Schooling` | Average number of years of schooling | Numeric |
+| `HIV_AIDS` | Prevalence of HIV/AIDS (% of population) | Numeric |
+| `Population` | Total population of the country | Numeric |
+| `Status` | Country classification as Developed or Developing | Factor |
+
+### **Rregressor graphs**
+
+### **Adult mortality**
+
+```{r}
+ggplot(life_exp_clean, aes(x = adult_mortality)) +
+  geom_histogram(binwidth = 25, fill = "skyblue", color = "black") +
+  labs(title = "Distribution of Adult Mortality", x = "Adult Mortality (per 1000)", y = "Frequency")
+
+```
+
+### Adult mortality vs. Life Expectancy
+
+```{r}
+ggplot(life_exp_clean, aes(x = adult_mortality, y = life_expectancy)) +
+  geom_point(color = "darkblue") +
+  labs(title = "Life Expectancy by Adult Mortality Rate", x = "Adult Mortality", 
+       y = "Life Expectancy")
+```
+
+### BMI
+
+```{r}
+# Histogram for BMI
+ggplot(life_exp_clean, aes(x = BMI)) +
+  geom_histogram(binwidth = 5, fill = "lightgreen", color = "black") +
+  labs(title = "Distribution of BMI", x = "BMI", y = "Frequency")
+
+```
+
+### BMI **vs. Life Expectancy**
+
+```{r}
+# Scatter Plot for BMI vs. Life Expectancy
+ggplot(life_exp_clean, aes(x = BMI, y = life_expectancy)) +
+  geom_point(color = "red") +
+  labs(title = "Life Expectancy by BMI", x = "BMI", y = "Life Expectancy")
+```
+
+### GDP
+
+```{r}
+# Histogram for GDP per Capita
+ggplot(life_exp_clean, aes(x = GDP)) +
+  geom_histogram(binwidth = 5000, fill = "purple", color = "black") +
+  labs(title = "Distribution of GDP per Capita", x = "GDP per Capita (USD)", y = "Frequency")
+```
+
+**log-transformation for GDP**
+
+```{r}
+# Apply a log transformation to GDP
+life_exp_clean <- 
+  life_exp_clean |>
+  mutate(log_GDP = log(GDP))
+
+
+summary(life_exp_clean)
+```
+
+### log_GDP
+
+```{r}
+# Histogram for GDP per Capita
+ggplot(life_exp_clean, aes(x = log_GDP)) +
+  geom_histogram(fill = "purple", color = "black") +
+  labs(title = "Distribution of log GDP per Capita", x = "log GDP per Capita (log USD)", y = "Frequency")
+```
+
+### **log_GDP vs. Life Expectancy**
+
+```{r}
+# Scatter Plot for GDP vs. Life Expectancy
+ggplot(life_exp_clean, aes(x = log_GDP, y = life_expectancy)) +
+  geom_point(color = "purple") +
+  labs(title = "Life Expectancy by log_GDP per Capita", x = "log_GDP per Capita", 
+       y = "Life Expectancy")
+```
+
+### Schooling
+
+```{r}
+# Histogram for Schooling
+ggplot(life_exp_clean, aes(x = Schooling)) +
+  geom_histogram(binwidth = 1, fill = "lightblue", color = "black") +
+  labs(title = "Distribution of Years of Schooling", x = "Years of Schooling", y = "Frequency")
+
+```
+
+### **Schooling vs. Life Expectancy**
+
+```{r}
+# Scatter Plot for Schooling vs. Life Expectancy
+ggplot(life_exp_clean, aes(x = Schooling, y = life_expectancy)) +
+  geom_point(color = "black") +
+  labs(title = "Life Expectancy by Years of Schooling", x = "Years of Schooling", 
+       y = "Life Expectancy")
+```
+
+### HIV_AIDS
+
+```{r}
+# Histogram for HIV/AIDS Prevalence
+ggplot(life_exp_clean, aes(x = HIV_AIDS)) +
+  geom_histogram(binwidth = 1, fill = "orange", color = "black") +
+  labs(title = "Distribution of HIV/AIDS Prevalence", x = "HIV/AIDS Prevalence (%)", y = "Frequency")
+
+```
+
+### **Make HIV_AIDS categorical**
+
+```{r}
+# Categorize HIV_AIDS prevalence
+life_exp_clean <- life_exp_clean |>
+  mutate(
+    HIV_AIDS_level = case_when(
+      HIV_AIDS <= 0.4 ~ "Low",           # Prevalence <= 0.4%
+      HIV_AIDS > 0.4 & HIV_AIDS <= 5 ~ "Moderate", # Prevalence > 0.4% & <= 5%
+      HIV_AIDS > 5 ~ "High"             # Prevalence > 5%
+    )
+  )
+
+# Declare levels for the new factor variable
+life_exp_clean$HIV_AIDS_level <- factor(
+  life_exp_clean$HIV_AIDS_level,
+  levels = c("Low", "Moderate", "High")
+)
+```
+
+```{r}
+summary(life_exp_clean$HIV_AIDS_level)
+```
+
+### Box plot HIV_AIDS
+
+```{r}
+# Bar Chart for HIV_AIDS Categories
+ggplot(life_exp_clean, aes(x = HIV_AIDS_level, fill = HIV_AIDS_level)) +
+  geom_bar(color = "black") +
+  labs(
+    title = "Distribution of HIV/AIDS Prevalence Categories",
+    x = "HIV/AIDS Prevalence Category",
+    y = "Count"
+  ) +
+  scale_fill_manual(values = c("green", "orange", "red")) 
+
+```
+
+### **HIV_AIDS vs. Life Expectancy**
+
+```{r}
+# Box Plot for HIV_AIDS vs Life Expectancy
+ggplot(life_exp_clean, aes(x = HIV_AIDS_level, y = life_expectancy, fill = HIV_AIDS_level)) +
+  geom_boxplot(color = "black") +
+  labs(
+    title = "Life Expectancy by HIV/AIDS Prevalence Category",
+    x = "HIV/AIDS Prevalence Category",
+    y = "Life Expectancy"
+  ) +
+  scale_fill_manual(values = c("green", "orange", "red"))
+
+```
+
+### Population
+
+```{r}
+# Histogram for Population
+ggplot(life_exp_clean, aes(x = Population)) +
+  geom_histogram( fill = "blue", color = "black") +
+  labs(
+    title = "Distribution of Population",
+    x = "Population",
+    y = "Frequency"
+  ) 
+
+```
+
+```{r}
+summary(life_exp_clean$Population)
+```
+
+```{r}
+# Apply log transformation to Population
+life_exp_clean <- life_exp_clean |>
+  mutate(log_Population = log(Population + 1))
+```
+
+```{r}
+# Histogram for Log-Transformed Population
+ggplot(life_exp_clean, aes(x = log_Population)) +
+  geom_histogram(binwidth = 0.5, fill = "blue", color = "black") +
+  labs(
+    title = "Distribution of Log-Transformed Population",
+    x = "Log(Population)",
+    y = "Frequency"
+  ) 
+```
+
+### log Population vs Life Expectancy
+
+```{r}
+# Scatter Plot for Log-Transformed Population vs Life Expectancy
+ggplot(life_exp_clean, aes(x = log_Population, y = life_expectancy)) +
+  geom_point(color = "blue", alpha = 0.7) +
+  labs(
+    title = "Life Expectancy vs Log-Transformed Population",
+    x = "Log(Population)",
+    y = "Life Expectancy"
+  ) 
+
+```
+
+### Status
+
+```{r}
+# Bar Plot for Country Status
+ggplot(life_exp_clean, aes(x = Status, fill = Status)) +
+  geom_bar(color = "black") +
+  labs(title = "Distribution of Country Status", x = "Country Status", y = "Count") +
+  scale_fill_manual(values = c("red", "cyan"))
+
+```
+
+### **Status vs. Life Expectancy**
+
+```{r}
+# Boxplot for Status vs. Life Expectancy
+ggplot(life_exp_clean, aes(x = Status, y = life_expectancy, fill = Status)) +
+  geom_boxplot() +
+  labs(title = "Life Expectancy by Country Status", x = "Country Status", 
+       y = "Life Expectancy")
+```
+
+```{r}
+# Subset the data frame to include the necessary variables
+final_life_exp <- life_exp_clean |>
+  select(
+    life_expectancy,
+    adult_mortality,
+    BMI,
+    log_GDP,
+    Schooling,
+    HIV_AIDS_level,         
+    log_Population,   
+    Status            
+  )
+```
+
+```{r}
+# Create a new copy of the data frame to reset indices
+final_life_exp <- as.data.frame(final_life_exp)
+
+# Remove any row names
+rownames(final_life_exp) <- NULL
+```
+
+```{r}
+summary(final_life_exp)
+```
+
+## Variable Selection
+
+```{r}
+complete_lmod <- lm(life_expectancy ~ ., data = final_life_exp)
+```
+
+```{r}
+summary(complete_lmod)
+```
+
+### **Best subset regression with** ${R_{a}^2}$
+
+```{r}
+rs <- leaps::regsubsets(formula(complete_lmod), data = final_life_exp)
+```
+
+```{r}
+plot(rs, scale = "adjr2")
+```
+
+```{r}
+# Fit the regression model
+best_subset_lmod <- lm(life_expectancy ~ adult_mortality + 
+                    Schooling + HIV_AIDS_level + log_Population + 
+                    Status, data = final_life_exp)
+
+# Display the summary of the model
+summary(best_subset_lmod)
+```
+
+#### **Model formula (Best subset)**
+
+$$
+\begin{aligned}&E(\mathtt{life\_expectancy} \mid \mathtt{adult\_mortality}, \mathtt{Schooling}, \mathtt{HIV\_AIDS\_level}, \mathtt{log\_Population}, \mathtt{Status}) \\&\qquad = 62.294 - 0.026 \mathtt{adult\_mortality} + 1.264 \mathtt{Schooling} - 5.412 \mathtt{HIV\_AIDS_{Moderate}} - 3.407 \mathtt{HIV\_AIDS_{High}} \\&\qquad \quad - 0.017 \mathtt{log\_Population} - 1.986 \mathtt{Status_{Developing}}.\end{aligned}
+$$
+
+### **Stepwise selection**
+
+```{r}
+# Remove rows with missing values
+clean_life_exp <- na.omit(final_life_exp)
+
+# Fit the complete model
+complete_lmod_2 <- lm(life_expectancy ~ ., data = clean_life_exp)
+
+# Perform stepwise selection
+stepwise_reg <- step(complete_lmod_2, direction = "both")
+```
+
+```{r}
+step_lmod <- lm(life_expectancy ~ adult_mortality + Schooling + HIV_AIDS_level + Status, 
+                 data = clean_life_exp)
+
+summary(step_lmod)
+
+```
+
+#### **Model formula (Stepwise)**
+
+$$
+\begin{aligned}
+&E(\mathtt{life\_expectancy} \mid \mathtt{adult\_mortality}, \mathtt{Schooling}, \mathtt{HIV\_AIDS\_level}, \mathtt{Status}) \\
+&\qquad = 61.089 - 0.027 \mathtt{adult\_mortality} + 1.326 \mathtt{Schooling} \\
+&\qquad \quad - 5.362 \mathtt{HIV\_AIDS_{Moderate}} - 3.016 \mathtt{HIV\_AIDS_{High}} - 1.747 \mathtt{Status_{Developing}}.
+\end{aligned}
+$$
+
+### Mallow’s $C_p$ Statistic
+
+```{r}
+srs <- summary(rs)
+p <- seq_along(srs$cp) + 1
+plot(srs$cp ~ p, ylab = "Mallow's Cp", ylim = c(0, max(p)))
+abline(0, 1)
+```
+
+```{r}
+srs$which
+```
+
+### The best model
+
+```{r}
+final_best_lmod <- lm(life_expectancy ~ adult_mortality + Schooling + 
+                        HIV_AIDS_level + log_Population + Status, 
+                      data = final_life_exp)
+```
+
+```{r}
+coef(final_best_lmod)
+```
+
+$$
+\begin{aligned}&E(\mathtt{life\_expectancy} \mid \mathtt{adult\_mortality}, \mathtt{Schooling}, \mathtt{HIV\_AIDS\_level}, \mathtt{log\_Population}, \mathtt{Status}) \\&\qquad = 62.294 - 0.026 \mathtt{adult\_mortality} + 1.264 \mathtt{Schooling} - 5.412 \mathtt{HIV\_AIDS_{Moderate}} - 3.407 \mathtt{HIV\_AIDS_{High}} \\&\qquad \quad - 0.017 \mathtt{log\_Population} - 1.986 \mathtt{Status_{Developing}}.\end{aligned}
+$$
+
+## Checking assumptions
+
+### Structural assumptions
+
+```{r}
+residualPlot(final_best_lmod, quadratic = FALSE)
+```
+
+```{r}
+residualPlots(final_best_lmod, 
+              tests = FALSE, quadratic = FALSE, fitted = FALSE)
+```
+
+### Checking for influential observations
+
+#### **Outliers**
+
+```{r}
+outlier_plot(final_best_lmod, id_n = 2)
+```
+
+```{r}
+outlier_test(final_best_lmod)
+```
+
+#### Leverage points
+
+```{r}
+leverage_plot(final_best_lmod)
+```
+
+```{r}
+(leverage_countries <- life_exp_clean[c(93, 156, 183), ])
+```
+
+#### Influential observations
+
+```{r}
+cooks_plot(final_best_lmod, id_n = 3)
+```
+
+```{r}
+ final_life_exp[c(93, 182, 183), ]
+```
+
+```{r}
+(influencial_countries <- life_exp_clean[c(93, 182, 183), ])
+```
+
+### **Constant Variance**
+
+```{r}
+residualPlot(final_best_lmod, type = "rstandard", quadratic = FALSE)
+```
+
+```{r}
+plot(final_best_lmod, which = 3)
+```
+
+### **Checking normality of errors**
+
+```{r}
+qqPlot(final_best_lmod)
+```
+
+```{r}
+shapiro.test(rstandard(final_best_lmod))
+```
+
+## Inferences
+
+### Comparing complete model against final model
+
+So that we don't get this problem ("models were not all fitted to the same size of dataset") we do the following
+
+```{r}
+complete_data <- final_life_exp[complete.cases(final_life_exp[, c("adult_mortality", "BMI", "log_GDP", 
+                                                                  "Schooling", "HIV_AIDS_level", 
+                                                                  "log_Population", "Status")]), ]
+```
+
+```{r}
+complete_lmod_refit <- lm(life_expectancy ~ ., data = complete_data)
+
+final_best_lmod_refit <- lm(life_expectancy ~ adult_mortality + Schooling + 
+                             HIV_AIDS_level + log_Population + Status, 
+                             data = complete_data)
+```
+
+$$
+\begin{aligned}
+&H_0: \beta_{\mathtt{BMI}} = \beta_{\mathtt{log\_GDP}} = 0 \mid \{\beta_{\mathtt{Intercept}}, \beta_{\mathtt{adult\_mortality}}, \beta_{\mathtt{Schooling}}, \beta_{\mathtt{HIV\_AIDS\_level}}, \beta_{\mathtt{log\_Population}}, \beta_{\mathtt{Status}}\} \in \mathbb{R}^6.\\
+&H_a: \beta_{\mathtt{BMI}} \neq 0 \text{ or } \beta_{\mathtt{log\_GDP}} \neq 0 \mid \{\beta_{\mathtt{Intercept}}, \beta_{\mathtt{adult\_mortality}}, \beta_{\mathtt{Schooling}}, \beta_{\mathtt{HIV\_AIDS\_level}}, \beta_{\mathtt{log\_Population}}, \beta_{\mathtt{Status}}\} \in \mathbb{R}^6.
+\end{aligned}
+$$
+
+```{r}
+anova(final_best_lmod_refit, complete_lmod_refit)
+```
+
+The ANOVA results show no significant difference between the two models `p-value = 0.72`. This indicates that including additional predictors like `BMI` and `log_GDP` in the complete model does not significantly improve the fit compared to the final best model. Therefore, the simpler final best model is preferable.
+
+### **Confidence intervals for parameters**
+
+```{r}
+confint_adjust(final_best_lmod, method = "bonferroni")
+```
+
+```{r}
+confint_adjust(final_best_lmod, method = "wh")
+```
+
+## Collinearity
+
+```{r}
+vif(final_best_lmod)
+```
+
+We can see that the VIF values for all the variables in our model are below the threshold of 10, thus there are no collinearity issues in our model.
+
+## Effect plots
+
+```{r}
+plot(allEffects(final_best_lmod))
+```
