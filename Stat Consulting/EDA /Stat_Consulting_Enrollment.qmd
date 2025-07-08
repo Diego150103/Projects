@@ -1,0 +1,799 @@
+---
+title: "Prediction of Enrollment"
+format: html
+self-contained: true
+author:
+  - name: Diego Garza Valdez 
+  - name: Tristen Orndorff
+---
+
+## Loading Libraries
+
+```{r}
+library(tidyverse)
+library(plotly) 
+library(stringr)
+library(purrr)
+library(lubridate)
+library(forecast)
+```
+
+## Importing Data
+
+```{r}
+raw_data <- read.csv("https://raw.githubusercontent.com/Diego150103/Enrollments_Data/refs/heads/main/merged_data.csv")
+
+enrolment_data <- raw_data
+```
+
+```{r}
+# 1) Create data frames with Fall and Spring census dates
+fall_df <- data.frame(
+  year = c(2020, 2021, 2022, 2023, 2024, 2025),
+  census_date = as.Date(c(
+    "2020-09-08",  # Fall 2020
+    "2021-09-07",  # Fall 2021
+    "2022-09-06",  # Fall 2022
+    "2023-09-05",  # Fall 2023
+    "2024-09-04",  # Fall 2024
+    "2025-09-03"   # Fall 2025
+  ))
+)
+
+spring_df <- data.frame(
+  year = c(2019, 2020, 2021, 2022, 2023, 2024, 2025),
+  census_date = as.Date(c(
+    "2019-02-11",  # Spring 2019
+    "2020-02-10",  # Spring 2020
+    "2021-02-09",  # Spring 2021
+    "2022-02-08",  # Spring 2022
+    "2023-02-07",  # Spring 2023
+    "2024-02-06",  # Spring 2024
+    "2025-02-05"   # Spring 2025
+  ))
+)
+```
+
+## Data Cleaning
+
+```{r}
+clean_enrollment_data <- enrolment_data |>
+  
+  mutate(
+    # Convert StartDate & EndDate from "m/d/yy" to Date objects
+    StartDate = mdy(StartDate),
+    EndDate   = mdy(EndDate),
+    # Convert Timestamp from "m/d/yy hh:mm" to POSIXct
+    Timestamp = mdy_hm(Timestamp)
+  ) |>
+    
+  filter(
+    # Keep only in-person MATH lectures, exclude Summer
+    InstructionMode == "P",
+    Component == "LEC",
+    Subject == "MATH",
+    !str_detect(TermDescr, regex("Summer", ignore_case = TRUE))
+  ) |>
+    
+  select(
+    Subject, CatalogNumber, Title, Section, StartDate, Timestamp, EnrollmentTotal, TermDescr
+  ) |>
+  
+  mutate(
+    # Convert these columns to factors
+    Subject       = factor(Subject),
+    Title         = factor(Title),
+    CatalogNumber = factor(CatalogNumber),
+    TermDescr     = factor(TermDescr)
+  ) |>
+  
+  rename(
+    # Rename columns for clarity
+    subject              = Subject,
+    catalog_number       = CatalogNumber,
+    name_of_class        = Title,
+    start_date           = StartDate,
+    timestamp            = Timestamp,
+    total_of_enrollments = EnrollmentTotal,
+    term                 = TermDescr
+  ) |>
+  
+  # 1) Extract 4-digit year from 'term' (e.g., "Fall 2024" → 2024)
+  mutate(
+    year = as.integer(str_extract(term, "\\d{4}")),
+    # 2) Identify if it's Fall or Spring
+    season = case_when(
+      str_detect(term, "Fall")   ~ "Fall",
+      str_detect(term, "Spring") ~ "Spring",
+      TRUE ~ NA_character_
+    )
+  ) |>
+  
+  # 3) Match each row's (season, year) to the correct census_date
+  mutate(
+    census_date = case_when(
+      season == "Fall"   ~ fall_df$census_date[match(year, fall_df$year)],
+      season == "Spring" ~ spring_df$census_date[match(year, spring_df$year)],
+      TRUE               ~ as.Date(NA)
+    )
+  ) |>
+  
+  # 4) Remove any rows whose timestamp is after that term's census_date
+  filter(timestamp <= census_date) |>
+  
+  # Finally, sort in ascending order by timestamp
+  arrange(timestamp)
+```
+
+```{r}
+#Convert enrollment data frame to a tible
+clean_enrollment_data_tibble <- as_tibble(clean_enrollment_data)
+```
+
+```{r}
+clean_enrollment_data2 <- clean_enrollment_data_tibble |>
+
+  #Create a day-only column
+  mutate(day_of_timestamp = as.Date(timestamp)) |>
+  
+  #For each course/day/section, keep the row with the earliest timestamp
+  group_by(subject, catalog_number, name_of_class, term, start_date, day_of_timestamp, Section) |>
+  filter(timestamp == min(timestamp)) |>
+  # If multiple rows share the exact same timestamp, keep the one with max enrollment
+  filter(total_of_enrollments == max(total_of_enrollments)) |>
+  ungroup() |>
+  
+  #Sum across sections to get a single enrollment count per course/day
+  group_by(subject, catalog_number, name_of_class, term, start_date, day_of_timestamp, census_date) |>
+  summarize(
+    total_of_enrollments = sum(total_of_enrollments, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  
+  #Rename & sort
+  rename(timestamp = day_of_timestamp) |>
+  arrange(timestamp)
+```
+
+```{r}
+# Suppose 'clean_enrollment_data2' is a data frame with:
+#   subject, catalog_number, term, timestamp (POSIXct or Date),
+#   total_of_enrollments, etc.
+
+# 1) For each course+term, find earliest & latest daily timestamps,
+#    converting them explicitly to Date
+term_range <- clean_enrollment_data2 |>
+  group_by(subject, catalog_number, term) |>
+  summarize(
+    earliest_date = as.Date(min(timestamp, na.rm = TRUE)),
+    latest_date   = as.Date(max(timestamp, na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+# 2) For each course, define next_term_start as the day before the next term's earliest_date
+term_range <- term_range |>
+  group_by(subject, catalog_number) |>
+  arrange(earliest_date) |>
+  mutate(next_term_start = lead(earliest_date) - 1) |>
+  ungroup()
+
+# 3) Join 'next_term_start' back into clean_enrollment_data2
+clean_enrollment_data2 <- clean_enrollment_data2 |>
+  left_join(term_range |> select(subject, catalog_number, term, next_term_start),
+            by = c("subject", "catalog_number", "term"))
+
+# 4) Build a daily sequence for each (course+term)
+fill_daily <- term_range |>
+  rowwise() |>
+  mutate(
+    # If next_term_start is NA, fill only to that term's latest_date
+    fill_end = ifelse(is.na(next_term_start), latest_date, next_term_start),
+    # 'fill_end' might be numeric if the above ifelse returns NA or numeric
+    # so we force it back to Date. Also ensure earliest_date is a Date.
+    fill_end = as.Date(fill_end, origin = "1970-01-01"),
+    earliest_date = as.Date(earliest_date, origin = "1970-01-01"),
+    # Now create the daily sequence
+    all_days = list(seq(from = earliest_date, to = fill_end, by = "day"))
+  ) |>
+  ungroup() |>
+  select(subject, catalog_number, term, all_days) |>
+  unnest(cols = c(all_days)) |>
+  rename(timestamp = all_days)
+
+# 5) Merge the expanded daily data with your original data
+clean_enrollment_data3 <- fill_daily |>
+  left_join(clean_enrollment_data2,
+            by = c("subject", "catalog_number", "term", "timestamp")) |>
+  # 6) For missing rows, fill total_of_enrollments with 0
+  mutate(total_of_enrollments = coalesce(total_of_enrollments, 0)) |>
+  arrange(subject, catalog_number, term, timestamp)
+```
+
+```{r}
+top_six_bigger_class <- clean_enrollment_data3 |>
+  filter(catalog_number %in% c("1010", "1401", "2830", "2411", "1060", "1110"))
+
+# Filter data for every big class offered
+calc1_data <- top_six_bigger_class |>
+  filter(catalog_number == "1401")
+
+math_for_liberal_data <- top_six_bigger_class |>
+  filter(catalog_number == "1010")
+
+intro_stats_data <- top_six_bigger_class |>
+  filter(catalog_number == "2830")
+
+calc2_data <- top_six_bigger_class |>
+  filter(catalog_number == "2411")
+
+finite_math <- top_six_bigger_class |>
+  filter(catalog_number == "1060")
+
+college_algebra_data <- top_six_bigger_class |>
+  filter(catalog_number == "1110")
+```
+
+## Data Visualization
+
+### Calculus I
+
+```{r}
+### Filter subsets
+calc1_fall_data <- calc1_data |>
+  filter(str_detect(term, "Fall"))
+
+calc1_spring_data <- calc1_data |>
+  filter(str_detect(term, "Spring"))
+
+calc1_2024_data <- calc1_data |>
+  filter(term == "Spring 2024" | term == "Fall 2024")
+
+```
+
+```{r}
+# Plot all data for Calc I
+calc1_all_graph <- calc1_data |>
+  ggplot( aes(x = timestamp, y = total_of_enrollments)) +
+    geom_area(fill="red", alpha=0.5) +
+    geom_line(color="red") +
+    labs(
+      title = "Enrollment Over Time for Calculus I (MATH 1401)",
+      x = "Date",
+      y = "Enrollment Total"
+    ) +
+    theme_minimal()
+
+# Turn it interactive with ggplotly
+calc1_all_graph <- ggplotly(calc1_all_graph)
+calc1_all_graph
+
+
+### Plot Fall terms
+calc1_fall_graph <- calc1_fall_data |>
+  ggplot( aes(x = timestamp, y = total_of_enrollments)) +
+    geom_area(fill="red", alpha=0.5) +
+    geom_line(color="red") +
+    labs(
+      title = "Fall Term Enrollment Trends for Calculus I (MATH 1401)",
+      x = "Date",
+      y = "Enrollment Total"
+    ) +
+    theme_minimal()
+
+calc1_fall_graph <- ggplotly(calc1_fall_graph)
+calc1_fall_graph
+
+
+### Plot Spring terms
+calc1_spring_graph <- calc1_spring_data |>
+  ggplot( aes(x = timestamp, y = total_of_enrollments)) +
+    geom_area(fill="red", alpha=0.5) +
+    geom_line(color="red") +
+    labs(
+      title = "Spring Term Enrollment Trends for Calculus I (MATH 1401)",
+      x = "Date",
+      y = "Enrollment Total"
+    ) +
+    theme_minimal()
+
+calc1_spring_graph <- ggplotly(calc1_spring_graph)
+calc1_spring_graph
+
+
+### Plot 2024 (Spring + Fall)
+calc1_2024_graph <- calc1_2024_data |>
+  ggplot( aes(x = timestamp, y = total_of_enrollments)) +
+    geom_area(fill="red", alpha=0.5) +
+    geom_line(color="red") +
+    labs(
+      title = "2024 Term Enrollment Trends for Calculus I (MATH 1401)",
+      x = "Date",
+      y = "Enrollment Total"
+    ) +
+    theme_minimal()
+
+calc1_2024_graph <- ggplotly(calc1_2024_graph)
+calc1_2024_graph
+```
+
+### Math for Liberal Arts
+
+```{r}
+### Filter subsets
+math_for_liberal_fall_data <- math_for_liberal_data |>
+  filter(str_detect(term, "Fall"))
+
+math_for_liberal_spring_data <- math_for_liberal_data |>
+  filter(str_detect(term, "Spring"))
+
+math_for_liberal_2024_data <- math_for_liberal_data |>
+  filter(term == "Spring 2024" | term == "Fall 2024")
+```
+
+```{r}
+### Plot all data for Math for Liberal Arts
+liberal_all_graph <- math_for_liberal_data |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments)) +
+  geom_area(fill = "deeppink", alpha = 0.5) +
+  geom_line(color = "deeppink") +
+  labs(
+    title = "Enrollment Over Time for Math for Liberal Arts (MATH 1010)",
+    x = "Date",
+    y = "Enrollment Total"
+  ) +
+  theme_minimal()
+
+liberal_all_graph <- ggplotly(liberal_all_graph)
+liberal_all_graph
+
+### Plot Fall terms
+liberal_fall_graph <- math_for_liberal_fall_data |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments)) +
+  geom_area(fill = "deeppink", alpha = 0.5) +
+  geom_line(color = "deeppink") +
+  labs(
+    title = "Fall Term Enrollment Trends for Math for Liberal Arts",
+    x = "Date",
+    y = "Enrollment Total"
+  ) +
+  theme_minimal()
+
+liberal_fall_graph <- ggplotly(liberal_fall_graph)
+liberal_fall_graph
+
+### Plot Spring terms
+liberal_spring_graph <- math_for_liberal_spring_data |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments)) +
+  geom_area(fill = "deeppink", alpha = 0.5) +
+  geom_line(color = "deeppink") +
+  labs(
+    title = "Spring Term Enrollment Trends for Math for Liberal Arts",
+    x = "Date",
+    y = "Enrollment Total"
+  ) +
+  theme_minimal()
+
+liberal_spring_graph <- ggplotly(liberal_spring_graph)
+liberal_spring_graph
+
+### Plot 2024 (Spring + Fall)
+liberal_2024_graph <- math_for_liberal_2024_data |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments)) +
+  geom_area(fill = "deeppink", alpha = 0.5) +
+  geom_line(color = "deeppink") +
+  labs(
+    title = "2024 Term Enrollment Trends for Math for Liberal Arts",
+    x = "Date",
+    y = "Enrollment Total"
+  ) +
+  theme_minimal()
+
+liberal_2024_graph <- ggplotly(liberal_2024_graph)
+liberal_2024_graph
+```
+
+### Intro to Stats
+
+```{r}
+### Filter subsets
+intro_stats_fall_data <- intro_stats_data |>
+  filter(str_detect(term, "Fall"))
+
+intro_stats_spring_data <- intro_stats_data |>
+  filter(str_detect(term, "Spring"))
+
+intro_stats_2024_data <- intro_stats_data |>
+  filter(term == "Spring 2024" | term == "Fall 2024")
+```
+
+```{r}
+### Plot all data for Intro to Stats
+intro_stats_all_graph <- intro_stats_data |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments)) +
+  geom_area(fill = "blue", alpha = 0.5) +
+  geom_line(color = "blue") +
+  labs(
+    title = "Enrollment Over Time for Introductory Statistics (MATH 2830)",
+    x = "Date",
+    y = "Enrollment Total"
+  ) +
+  theme_minimal()
+
+intro_stats_all_graph <- ggplotly(intro_stats_all_graph)
+intro_stats_all_graph
+
+### Plot Fall terms
+intro_stats_fall_graph <- intro_stats_fall_data |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments)) +
+  geom_area(fill = "blue", alpha = 0.5) +
+  geom_line(color = "blue") +
+  labs(
+    title = "Fall Term Enrollment Trends for Intro Stats",
+    x = "Date",
+    y = "Enrollment Total"
+  ) +
+  theme_minimal()
+
+intro_stats_fall_graph <- ggplotly(intro_stats_fall_graph)
+intro_stats_fall_graph
+
+### Plot Spring terms
+intro_stats_spring_graph <- intro_stats_spring_data |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments)) +
+  geom_area(fill = "blue", alpha = 0.5) +
+  geom_line(color = "blue") +
+  labs(
+    title = "Spring Term Enrollment Trends for Intro Stats",
+    x = "Date",
+    y = "Enrollment Total"
+  ) +
+  theme_minimal()
+
+intro_stats_spring_graph <- ggplotly(intro_stats_spring_graph)
+intro_stats_spring_graph
+
+### Plot 2024 (Spring + Fall)
+intro_stats_2024_graph <- intro_stats_2024_data |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments)) +
+  geom_area(fill = "blue", alpha = 0.5) +
+  geom_line(color = "blue") +
+  labs(
+    title = "2024 Term Enrollment Trends for Intro Stats",
+    x = "Date",
+    y = "Enrollment Total"
+  ) +
+  theme_minimal()
+
+intro_stats_2024_graph <- ggplotly(intro_stats_2024_graph)
+intro_stats_2024_graph
+```
+
+### Calculus 2
+
+```{r}
+### Filter subsets
+calc2_fall_data <- calc2_data |>
+  filter(str_detect(term, "Fall"))
+
+calc2_spring_data <- calc2_data |>
+  filter(str_detect(term, "Spring"))
+
+calc2_2024_data <- calc2_data |>
+  filter(term == "Spring 2024" | term == "Fall 2024")
+```
+
+```{r}
+### Plot all data for Calculus II
+calc2_all_graph <- calc2_data |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments)) +
+  geom_area(fill = "green", alpha = 0.5) +
+  geom_line(color = "green") +
+  labs(
+    title = "Enrollment Over Time for Calculus II (MATH 2411)",
+    x = "Date",
+    y = "Enrollment Total"
+  ) +
+  theme_minimal()
+
+calc2_all_graph <- ggplotly(calc2_all_graph)
+calc2_all_graph
+
+### Plot Fall terms
+calc2_fall_graph <- calc2_fall_data |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments)) +
+  geom_area(fill = "green", alpha = 0.5) +
+  geom_line(color = "green") +
+  labs(
+    title = "Fall Term Enrollment Trends for Calculus II",
+    x = "Date",
+    y = "Enrollment Total"
+  ) +
+  theme_minimal()
+
+calc2_fall_graph <- ggplotly(calc2_fall_graph)
+calc2_fall_graph
+
+### Plot Spring terms
+calc2_spring_graph <- calc2_spring_data |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments)) +
+  geom_area(fill = "green", alpha = 0.5) +
+  geom_line(color = "green") +
+  labs(
+    title = "Spring Term Enrollment Trends for Calculus II",
+    x = "Date",
+    y = "Enrollment Total"
+  ) +
+  theme_minimal()
+
+calc2_spring_graph <- ggplotly(calc2_spring_graph)
+calc2_spring_graph
+
+### Plot 2024 (Spring + Fall)
+calc2_2024_graph <- calc2_2024_data |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments)) +
+  geom_area(fill = "green", alpha = 0.5) +
+  geom_line(color = "green") +
+  labs(
+    title = "2024 Term Enrollment Trends for Calculus II",
+    x = "Date",
+    y = "Enrollment Total"
+  ) +
+  theme_minimal()
+
+calc2_2024_graph <- ggplotly(calc2_2024_graph)
+calc2_2024_graph
+```
+
+### Finite Math
+
+```{r}
+### Filter subsets
+finite_fall_data <- finite_math |>
+  filter(str_detect(term, "Fall"))
+
+finite_spring_data <- finite_math |>
+  filter(str_detect(term, "Spring"))
+
+finite_2024_data <- finite_math |>
+  filter(term == "Spring 2024" | term == "Fall 2024")
+```
+
+```{r}
+### Plot all data for Finite Math
+finite_all_graph <- finite_math |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments)) +
+  geom_area(fill = "purple", alpha = 0.5) +
+  geom_line(color = "purple") +
+  labs(
+    title = "Enrollment Over Time for Finite Mathematics (MATH 1060)",
+    x = "Date",
+    y = "Enrollment Total"
+  ) +
+  theme_minimal()
+
+finite_all_graph <- ggplotly(finite_all_graph)
+finite_all_graph
+
+### Plot Fall terms
+finite_fall_graph <- finite_fall_data |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments)) +
+  geom_area(fill = "purple", alpha = 0.5) +
+  geom_line(color = "purple") +
+  labs(
+    title = "Fall Term Enrollment Trends for Finite Math",
+    x = "Date",
+    y = "Enrollment Total"
+  ) +
+  theme_minimal()
+
+finite_fall_graph <- ggplotly(finite_fall_graph)
+finite_fall_graph
+
+### Plot Spring terms
+finite_spring_graph <- finite_spring_data |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments)) +
+  geom_area(fill = "purple", alpha = 0.5) +
+  geom_line(color = "purple") +
+  labs(
+    title = "Spring Term Enrollment Trends for Finite Math",
+    x = "Date",
+    y = "Enrollment Total"
+  ) +
+  theme_minimal()
+
+finite_spring_graph <- ggplotly(finite_spring_graph)
+finite_spring_graph
+
+### Plot 2024 (Spring + Fall)
+finite_2024_graph <- finite_2024_data |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments)) +
+  geom_area(fill = "purple", alpha = 0.5) +
+  geom_line(color = "purple") +
+  labs(
+    title = "2024 Term Enrollment Trends for Finite Math",
+    x = "Date",
+    y = "Enrollment Total"
+  ) +
+  theme_minimal()
+
+finite_2024_graph <- ggplotly(finite_2024_graph)
+finite_2024_graph
+```
+
+### College of Algebra
+
+```{r}
+### Filter subsets
+college_algebra_fall_data <- college_algebra_data |>
+  filter(str_detect(term, "Fall"))
+
+college_algebra_spring_data <- college_algebra_data |>
+  filter(str_detect(term, "Spring"))
+
+college_algebra_2024_data <- college_algebra_data |>
+  filter(term == "Spring 2024" | term == "Fall 2024")
+```
+
+```{r}
+### Plot all data for College Algebra
+college_algebra_all_graph <- college_algebra_data |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments)) +
+  geom_area(fill = "orange", alpha = 0.5) +
+  geom_line(color = "orange") +
+  labs(
+    title = "Enrollment Over Time for College Algebra (MATH 1110)",
+    x = "Date",
+    y = "Enrollment Total"
+  ) +
+  theme_minimal()
+
+college_algebra_all_graph <- ggplotly(college_algebra_all_graph)
+college_algebra_all_graph
+
+### Plot Fall terms
+college_algebra_fall_graph <- college_algebra_fall_data |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments)) +
+  geom_area(fill = "orange", alpha = 0.5) +
+  geom_line(color = "orange") +
+  labs(
+    title = "Fall Term Enrollment Trends for College Algebra",
+    x = "Date",
+    y = "Enrollment Total"
+  ) +
+  theme_minimal()
+
+college_algebra_fall_graph <- ggplotly(college_algebra_fall_graph)
+college_algebra_fall_graph
+
+### Plot Spring terms
+college_algebra_spring_graph <- college_algebra_spring_data |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments)) +
+  geom_area(fill = "orange", alpha = 0.5) +
+  geom_line(color = "orange") +
+  labs(
+    title = "Spring Term Enrollment Trends for College Algebra",
+    x = "Date",
+    y = "Enrollment Total"
+  ) +
+  theme_minimal()
+
+college_algebra_spring_graph <- ggplotly(college_algebra_spring_graph)
+college_algebra_spring_graph
+
+### Plot 2024 (Spring + Fall)
+college_algebra_2024_graph <- college_algebra_2024_data |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments)) +
+  geom_area(fill = "orange", alpha = 0.5) +
+  geom_line(color = "orange") +
+  labs(
+    title = "2024 Term Enrollment Trends for College Algebra",
+    x = "Date",
+    y = "Enrollment Total"
+  ) +
+  theme_minimal()
+
+college_algebra_2024_graph <- ggplotly(college_algebra_2024_graph)
+college_algebra_2024_graph
+```
+
+### All classes trend in same graph
+
+```{r}
+### Filter subsets
+top_six_fall_data <- top_six_bigger_class |>
+  filter(str_detect(term, "Fall"))
+
+top_six_spring_data <- top_six_bigger_class |>
+  filter(str_detect(term, "Spring"))
+
+top_six_2024_data <- top_six_bigger_class |>
+  filter(term == "Spring 2024" | term == "Fall 2024")
+```
+
+```{r}
+### Plot for All Terms
+top_six_all_plot <- top_six_bigger_class |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments, color = catalog_number)) +
+  geom_line() +
+  labs(
+    title = "All-Term Enrollment Trends for Top 6 MATH Classes",
+    x = "Date",
+    y = "Enrollment Total",
+    color = "Catalog Number"
+  ) +
+  theme_minimal()
+
+top_six_all_plotly <- ggplotly(top_six_all_plot)
+top_six_all_plotly
+
+
+### Plot Fall Terms
+top_six_fall_plot <- top_six_fall_data |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments, color = catalog_number)) +
+  geom_line() +
+  labs(
+    title = "Fall-Term Enrollment Trends for Top 6 MATH Classes",
+    x = "Date",
+    y = "Enrollment Total",
+    color = "Catalog Number"
+  ) +
+  theme_minimal()
+
+top_six_fall_plotly <- ggplotly(top_six_fall_plot)
+top_six_fall_plotly
+
+
+### Plot Spring Terms
+top_six_spring_plot <- top_six_spring_data |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments, color = catalog_number)) +
+  geom_line() +
+  labs(
+    title = "Spring-Term Enrollment Trends for Top 6 MATH Classes",
+    x = "Date",
+    y = "Enrollment Total",
+    color = "Catalog Number"
+  ) +
+  theme_minimal()
+
+top_six_spring_plotly <- ggplotly(top_six_spring_plot)
+top_six_spring_plotly
+
+
+### Plot 2024 (Spring + Fall)
+top_six_2024_plot <- top_six_2024_data |>
+  ggplot(aes(x = timestamp, y = total_of_enrollments, color = catalog_number)) +
+  geom_line() +
+  labs(
+    title = "2024 Enrollment Trends for Top 6 MATH Classes",
+    x = "Date",
+    y = "Enrollment Total",
+    color = "Catalog Number"
+  ) +
+  theme_minimal()
+
+top_six_2024_plotly <- ggplotly(top_six_2024_plot)
+top_six_2024_plotly
+```
+
+### ARIMA TRY
+
+```{r}
+useful_calc1_enrollment_data <- calc1_data |>
+  mutate(term_year = as.integer(str_extract(term, "\\d{4}"))) %>%
+  filter(term_year > 2021 | (term_year == 2021 & str_detect(term, regex("Fall", ignore_case = TRUE)))) %>%
+  select(-term_year)
+```
+
+```{r}
+arima_calc <- ts(useful_calc1_enrollment_data$total_of_enrollments, frequency = 150)
+
+model_arima_calc <- auto.arima(arima_calc, seasonal = T)
+
+summary(model_arima_calc)
+```
+
+```{r}
+prediction <- forecast(model_arima_calc, h = 200)
+
+plot(prediction, main = "SARIMA Forecast of Enrollment", ylab = "Enrollment", xlab = "Time")
+```

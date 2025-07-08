@@ -1,0 +1,1047 @@
+---
+title: "Model Creation"
+format: html
+editor: visual
+self-contained: true
+author:
+  - name: Diego Garza Valdez 
+  - name: Tristen Orndorff
+---
+
+```{r}
+library(tidyverse)
+library(plotly) 
+library(stringr)
+library(purrr)
+library(lubridate)
+library(dplyr)
+library(forecast)
+library(prophet)
+library(Metrics) 
+```
+
+## Import .csv
+
+Fall 2021 after
+
+enrollent_data
+
+```{r}
+ enrollment_data<- as_tibble(read.csv("arima_data.csv"))
+```
+
+## Filter data
+
+```{r}
+str(enrollment_data)
+```
+
+The useful data for our analysis starts at Fall 2021
+
+```{r}
+useful_enrollment_data <- enrollment_data |>
+  mutate(term_year = as.integer(str_extract(term, "\\d{4}"))) |>
+  filter(term_year > 2021 | (term_year == 2021 & str_detect(term, regex("Fall", ignore_case = TRUE)))) |>
+  select(-term_year)
+
+useful_enrollment_data <- useful_enrollment_data |>
+  mutate(
+    timestamp  = as.Date(timestamp),
+    start_date = as.Date(start_date)
+  )
+```
+
+## Shifting data
+
+```{r}
+registration_date_next_semester_to_predict <- as.Date("2025-04-17")
+
+start_next_semester_to_predict <- as.Date("2025-08-18")
+
+two_weeks_before_next_semester_to_predict <- start_next_semester_to_predict - 14
+
+census_date_next_semester_to_predict <- as.Date("2025-09-03")
+```
+
+```{r}
+# Jam the semesters together by compressing the timeline based solely on observed days.
+shifted_data <- useful_enrollment_data |>
+  group_by(subject, catalog_number) |>    # Process each course individually.
+  arrange(timestamp) |>                     # Order the observations by the actual date.
+  mutate(day_seq = row_number()) |>         # Create a sequential index for the observed days.
+  # Re-base the index so that the most recent observation becomes -1.
+  mutate(days_before_registration = day_seq - max(day_seq) - 1) |>
+  ungroup() |>
+  select(-day_seq)      
+```
+
+```{r}
+start_next_index <- as.numeric(start_next_semester_to_predict - registration_date_next_semester_to_predict + max(shifted_data$days_before_registration))
+
+two_weeks_before_next_index <- as.numeric(start_next_index - 14)
+census_date_next_index <- as.numeric(census_date_next_semester_to_predict - registration_date_next_semester_to_predict + max(shifted_data$days_before_registration))
+
+```
+
+```{r}
+full_shifted_data <- shifted_data |>
+  mutate(
+    start_next_index = as.numeric(start_next_index),
+    two_weeks_before_next_index = as.numeric(two_weeks_before_next_index),
+    census_date_next_index = as.numeric(census_date_next_index)
+  )
+```
+
+```{r}
+top_six_bigger_class <- full_shifted_data |>
+  filter(catalog_number %in% c("1010", "1401", "2830", "2411", "1060", "1110"))
+
+# Filter data for every big class offered
+calc1_data <- top_six_bigger_class |>
+  filter(catalog_number == "1401")
+
+math_for_liberal_data <- top_six_bigger_class |>
+  filter(catalog_number == "1010")
+
+intro_stats_data <- top_six_bigger_class |>
+  filter(catalog_number == "2830")
+
+calc2_data <- top_six_bigger_class |>
+  filter(catalog_number == "2411")
+
+finite_math <- top_six_bigger_class |>
+  filter(catalog_number == "1060")
+
+college_algebra_data <- top_six_bigger_class |>
+  filter(catalog_number == "1110")
+```
+
+```{r}
+calc1_all_graph <- calc1_data |>
+  ggplot( aes(x = days_before_registration, y = total_of_enrollments)) +
+    geom_area(fill="red", alpha=0.5) +
+    geom_line(color="red") +
+    labs(
+      title = "Enrollment Over Time for Calculus I (MATH 1401)",
+      x = "Date",
+      y = "Enrollment Total"
+    ) +
+    theme_minimal()
+
+calc1_all_graph
+```
+
+## Model creation for Calculus I
+
+```{r}
+calc1_ts <- ts(calc1_data$total_of_enrollments, frequency = 150)
+
+sarima_model_calc1_all <- auto.arima(calc1_ts)
+```
+
+```{r}
+sarima_forecast_all <- forecast(sarima_model_calc1_all, h = 200)
+
+plot(sarima_forecast_all, main = "SARIMA Forecast of Enrollment", ylab = "Enrollment", xlab = "Time")
+```
+
+### Just Falls
+
+```{r}
+calc1_data_fall <- calc1_data |> 
+  filter(str_detect(term, regex("Fall", ignore_case = TRUE)))
+```
+
+```{r}
+calc1_series_fall <- ts(calc1_data_fall$total_of_enrollments, frequency = 150)
+
+sarima_model_fall <- auto.arima(calc1_series_fall, seasonal = T)
+```
+
+```{r}
+sarima_forecast_fall <- forecast(sarima_model_fall, h = 200)
+
+# Plot the forecast.
+plot(sarima_forecast_fall, main = "SARIMA Forecast of Enrollment", ylab = "Enrollment", xlab = "Time")
+```
+
+### Just Springs
+
+```{r}
+calc1_data_spring <- calc1_data |> 
+  filter(str_detect(term, regex("Spring", ignore_case = TRUE)))
+```
+
+```{r}
+calc1_series_spring <- ts(calc1_data_spring$total_of_enrollments, frequency = 150)
+
+sarima_model_spring <- auto.arima(calc1_series_spring, seasonal = T)
+```
+
+```{r}
+sarima_forecast_spring <- forecast(sarima_model_spring, h = 200)
+
+# Plot the forecast.
+plot(sarima_forecast_spring, main = "SARIMA Forecast of Enrollment", ylab = "Enrollment", xlab = "Time")
+```
+
+### Just Previous Spring
+
+```{r}
+calc1_data_spring <- calc1_data_spring |>
+  mutate(year = as.integer(str_extract(term, "\\d{4}")))
+  
+# Find the maximum (most recent) spring year.
+max_spring_year <- max(calc1_data_spring$year, na.rm = TRUE)
+
+# Then, filter for the previous spring year.
+calc1_data_prev_spring <- calc1_data_spring |>
+  filter(year == max_spring_year - 1) |>
+  select(-year)
+```
+
+```{r}
+calc1_series_prev_spring <- ts(calc1_data_prev_spring$total_of_enrollments, frequency = 1)
+
+sarima_model_prev_spring <- auto.arima(calc1_series_prev_spring, seasonal = T)
+```
+
+```{r}
+sarima_forecast_prev_spring <- forecast(sarima_model_prev_spring, h = 200)
+
+# Plot the forecast.
+plot(sarima_forecast_prev_spring, main = "SARIMA Forecast of Enrollment", ylab = "Enrollment", xlab = "Time")
+```
+
+### Just Previous Fall
+
+```{r}
+calc1_data_fall <- calc1_data_fall |>
+  mutate(year = as.integer(str_extract(term, "\\d{4}")))
+  
+# Find the maximum fall year.
+max_fall_year <- max(calc1_data_fall$year, na.rm = TRUE)
+
+# Filter for the previous fall year.
+calc1_data_prev_fall <- calc1_data_fall |>
+  filter(year == max_fall_year - 1) |>
+  select(-year)
+```
+
+```{r}
+calc1_series_prev_fall <- ts(calc1_data_prev_fall$total_of_enrollments, frequency = 1)
+
+sarima_model_prev_fall <- auto.arima(calc1_series_prev_fall, seasonal = T)
+```
+
+```{r}
+sarima_forecast_prev_fall <- forecast(sarima_model_prev_fall, h = 200)
+
+# Plot the forecast.
+plot(sarima_forecast_prev_fall, main = "SARIMA Forecast of Enrollment", ylab = "Enrollment", xlab = "Time")
+```
+
+**Prophet**
+
+```{r}
+prophet_data <- read.csv("prophet_data.csv")
+
+useful_enrollment_data_prophet <- prophet_data |>
+  mutate(term_year = as.integer(str_extract(term, "\\d{4}"))) |>
+  filter(term_year > 2021 | (term_year == 2021 & str_detect(term, regex("Fall", ignore_case = TRUE)))) |>
+  select(-term_year)
+
+useful_enrollment_data_prophet <- useful_enrollment_data_prophet |>
+  mutate(
+    timestamp  = as.Date(timestamp),
+    start_date = as.Date(start_date)
+  )
+
+```
+
+```{r}
+top_six_bigger_class <- useful_enrollment_data_prophet |>
+  filter(catalog_number %in% c("1010", "1401", "2830", "2411", "1060", "1110"))
+
+# Filter data for every big class offered
+calc1_data_prophet <- top_six_bigger_class |>
+  filter(catalog_number == "1401")
+
+math_for_liberal_data_prophet <- top_six_bigger_class |>
+  filter(catalog_number == "1010")
+
+intro_stats_data_prophet <- top_six_bigger_class |>
+  filter(catalog_number == "2830")
+
+calc2_data_prohet <- top_six_bigger_class |>
+  filter(catalog_number == "2411")
+
+finite_math_prophet <- top_six_bigger_class |>
+  filter(catalog_number == "1060")
+
+college_algebra_data_prophet <- top_six_bigger_class |>
+  filter(catalog_number == "1110")
+```
+
+```{r}
+# Plot all data for Calc I
+calc1_all_graph <- calc1_data_prophet |>
+  ggplot( aes(x = timestamp, y = total_of_enrollments)) +
+    geom_area(fill="red", alpha=0.5) +
+    geom_line(color="red") +
+    labs(
+      title = "Enrollment Over Time for Calculus I (MATH 1401)",
+      x = "Date",
+      y = "Enrollment Total"
+    ) +
+    theme_minimal()
+calc1_all_graph
+```
+
+### Explanation default prophet model
+
+The Prophet forecast is based on the additive model
+
+$$
+y(t) = g(t) \;+\; s_{\mathrm{yr}}(t) \;+\; s_{\mathrm{wk}}(t) \;+\; \epsilon_t
+$$
+
+where:
+
+1.  **Trend** $g(t)$\
+    A piecewise‐linear function with $K$ changepoints $\{\tau_j\}_{j=1}^K$: $$
+    g(t) = k\,t + m 
+      + \sum_{j=1}^K \delta_j\,(t - \tau_j)\,\mathbf{1}\{t > \tau_j\},
+    $$
+
+    -   $k$ = base growth rate
+    -   $m$ = offset (intercept)
+    -   $\delta_j$ = change in slope at changepoint $\tau_j$
+    -   $\mathbf{1}\{t>\tau_j\}$ = indicator function
+    -   **Defaults**: $K=25$ changepoints; Laplace prior on each $\delta_j$ (controlled by `changepoint.prior.scale = 0.05`).
+
+2.  **Yearly Seasonality** $s_{\mathrm{yr}}(t)$\
+    A Fourier series of order $N_{\mathrm{yr}}=10$ with period $P_{\mathrm{yr}}=365.25$: $$
+    s_{\mathrm{yr}}(t) =
+      \sum_{n=1}^{10} \Bigl[a_n \cos\!\bigl(2\pi n t / P_{\mathrm{yr}}\bigr)
+                         + b_n \sin\!\bigl(2\pi n t / P_{\mathrm{yr}}\bigr)\Bigr].
+    $$
+
+    -   Coefficients $\{a_n,b_n\}$ have Gaussian priors (default scale 10).
+
+3.  **Weekly Seasonality** $s_{\mathrm{wk}}(t)$\
+    A Fourier series of order $N_{\mathrm{wk}}=3$ with period $P_{\mathrm{wk}}=7$: $$
+    s_{\mathrm{wk}}(t) =
+      \sum_{n=1}^{3} \Bigl[c_n \cos\!\bigl(2\pi n t / 7\bigr)
+                        + d_n \sin\!\bigl(2\pi n t / 7\bigr)\Bigr].
+    $$
+
+4.  **Error Term** $\epsilon_t$\
+    Independent Gaussian noise: $$
+    \epsilon_t \sim \mathcal{N}(0,\sigma^2).
+    $$
+
+> **Note:** With default settings (`m <- prophet(df_prophet)`), daily seasonality is disabled and no holiday term is included.
+
+Putting it all together:
+
+$$
+y(t)
+= \underbrace{k\,t + m + \sum_{j=1}^{25} \delta_j\,(t-\tau_j)\,\mathbf{1}\{t>\tau_j\}}_{\text{Trend}}
+\;+\;
+\underbrace{\sum_{n=1}^{10}\bigl[a_n\cos\tfrac{2\pi n t}{365.25}+b_n\sin\tfrac{2\pi n t}{365.25}\bigr]}_{\text{Yearly}}
+\;+\;
+\underbrace{\sum_{n=1}^{3}\bigl[c_n\cos\tfrac{2\pi n t}{7}+d_n\sin\tfrac{2\pi n t}{7}\bigr]}_{\text{Weekly}}
+\;+\;
+\epsilon_t.
+$$
+
+-   **Trend** captures long‑term growth with piecewise linear segments.
+-   **Yearly** and **Weekly** terms capture periodic effects via Fourier series.
+-   **Error** adds random Gaussian noise.
+
+Prophet fits all parameters jointly under weak priors, balancing trend flexibility, seasonality, and overfitting.
+
+```{r}
+calc1_data_prophet <- calc1_data_prophet |>
+  mutate(
+    census_date     = as.Date(census_date),
+    next_term_start = as.Date(next_term_start)
+  )
+```
+
+```{r}
+# 1. Split into training (all but Spring 2025) and test (Spring 2025)
+calc1_data_prophet <- calc1_data_prophet |>
+  mutate(term_year = as.integer(str_extract(term, "\\d{4}")))
+
+train_data <- calc1_data_prophet |>
+  filter(!(str_detect(term, regex("Spring", ignore_case=TRUE)) & term_year == 2025))
+
+test_data  <- calc1_data_prophet |>
+  filter(str_detect(term, regex("Spring", ignore_case=TRUE)) & term_year == 2025)
+
+df_train <- train_data |>
+  transmute(ds = as.Date(timestamp), y = total_of_enrollments)
+
+df_test  <- test_data |>
+  transmute(ds = as.Date(timestamp), y = total_of_enrollments)
+```
+
+```{r}
+df_prophet <- train_data |> 
+  mutate(ds = timestamp, 
+         y = total_of_enrollments) |>
+  select(ds, y)
+
+
+m_default <- prophet(df_prophet,
+                     daily.seasonality = FALSE)
+
+
+future <- make_future_dataframe(m_default, periods = 200)
+forecast <- predict(m_default, future)
+
+
+plot(m_default, forecast) +
+  ggtitle("Prophet Forecast for Calculus I")
+
+
+prophet_plot_components(m_default, forecast)
+```
+
+```{r}
+valid_gaps <- train_data |>
+  filter(
+    !is.na(census_date),
+    !is.na(next_term_start),
+    next_term_start > census_date + 1
+  ) |>
+  distinct(census_date, next_term_start)
+
+
+holidays <- valid_gaps |>
+  pmap_dfr(function(census_date, next_term_start) {
+    data.frame(
+      holiday      = "inter",
+      ds           = seq.Date(census_date + 1, next_term_start - 1, by = "day"),
+      lower_window = 0,
+      upper_window = 0
+    )
+  })
+
+
+m_strict <- prophet(
+  df_prophet,
+  growth                  = "linear",
+  holidays                = holidays,
+  holidays.prior.scale    = 20,
+  yearly.seasonality      = T,
+  weekly.seasonality      = TRUE,
+  daily.seasonality       = FALSE,
+  n.changepoints          = 25,
+  changepoint.prior.scale = 0.05
+)
+
+
+# 4. Forecast and plot
+future_strict  <- make_future_dataframe(m_strict, periods = 200)
+forecast_strict <- predict(m_strict, future_strict)
+
+plot(m_strict, forecast_strict) +
+  ggtitle("Prophet: Forced Zero in Intersessions")
+
+prophet_plot_components(m_strict, forecast_strict)
+
+```
+
+```{r}
+semester_windows <- train_data |>
+  distinct(term, start_date, census_date) |>
+  filter(
+    !is.na(start_date),
+    !is.na(census_date),
+    start_date <= census_date
+  )
+
+semester_holidays <- semester_windows |>
+  rowwise() |>
+  mutate(
+    ds = list(seq.Date(start_date, census_date, by = "day"))
+  ) |>
+  ungroup() |>
+  select(term, ds) |>
+  rename(holiday = term) |>
+  mutate(lower_window = 0, upper_window = 0) |>
+  unnest(ds)
+
+head(semester_holidays)
+
+
+##df_prophet <- calc1_data_prophet |>
+ ## transmute(ds = timestamp, y = total_of_enrollments)
+
+m_sem <- prophet(
+  df_prophet,
+  holidays                = semester_holidays,
+  holidays.prior.scale    = 20,
+  yearly.seasonality      = TRUE,
+  weekly.seasonality      = TRUE,
+  daily.seasonality       = FALSE,
+  n.changepoints          = 25,
+  changepoint.prior.scale = 0.05
+)
+
+future   <- make_future_dataframe(m_sem, periods = 200)
+forecast <- predict(m_sem, future)
+
+plot(m_sem, forecast) +
+  ggtitle("Prophet with Semester‐Window Holidays")
+
+prophet_plot_components(m_sem, forecast)
+
+```
+
+```{r}
+horizon       <- 30
+initial_days  <- as.numeric(max(df_train$ds) - min(df_train$ds))
+initial_cv    <- initial_days - horizon
+```
+
+### All fall to predict fall
+
+```{r}
+df_fall_prophet <- calc1_data_fall |>
+  transmute(ds = as.Date(timestamp), y = total_of_enrollments)
+
+m_fall <- prophet(
+  df_fall_prophet,
+  daily.seasonality = FALSE,
+  interval.width = 0.9
+)
+
+
+future_fall   <- make_future_dataframe(m_fall, periods = 1)
+forecast_fall <- predict(m_fall, future_fall)
+
+
+plot(m_fall, forecast_fall) +
+  ggtitle("Tuned Prophet on Multi‑Year Fall Data")
+
+prophet_plot_components(m_fall, forecast_fall)
+
+```
+
+### Cross validation Walk Forward
+
+[**All data models to predict Spring 2025**]{.underline}
+
+walk-forward” evaluation is doing:
+
+1.  **Pre-build holiday signals**
+
+    -   **Intersession gaps:**  From your pre-2025 data we extract every multi-day break and label those days as “intersession” holidays so one model can learn to drop to zero off-term.
+
+    -   **Semester windows:**   We take each Fall’s start→census span and label those days as “in_session” so another model learns a single boost during term and zero off-term.
+
+2.  **Define three Prophet variants**
+
+    -   **Default:** A plain Prophet with daily seasonality turned off.
+
+    -   **Strict:** Prophet with the intersession holidays and stronger priors on holiday effects.
+
+    -   **Semester:** Prophet with the in_session windows and the same tuned priors.
+
+3.  **Fast walk-forward evaluation for horizons 1…H**
+
+    -   **Sequential retraining:**  Each day of Fall 2024 you add that day’s actual enrollment to the training set (all prior Falls + first i days of Fall 2024), then re-fit the chosen model.
+
+    -   **Multi-day forecasting:**  In one predict() call you forecast the next H days ahead, capturing predictions for day i+1 through i+H.
+
+    -   **Metric collection:**  For each horizon h you record
+
+        -   **RMSE** (in students)
+
+        -   **sMAPE** (a percent-error metric)
+
+        -   **Coverage** (fraction of true values inside the model’s 90% interval)
+
+4.  **Aggregate by horizon and model**
+
+    -   Collate all the step-ahead errors across every retrain into one table with rows for
+
+        $(\text{model},\,h=1),\,(\text{model},\,h=2),\,\dots,\,(\text{model},\,h=H)$
+
+    -   Compute the average RMSE, average sMAPE, and overall coverage at each lead time.
+
+```{r}
+library(dplyr)
+library(prophet)
+
+# — assume df_train and df_test are defined as before —
+
+# 1) Prebuilt holiday tables from df_train:
+holidays_train_strict <- calc1_data |>
+  arrange(timestamp) |>
+  mutate(next_day = lead(timestamp)) |>
+  filter(!is.na(next_day), as.numeric(next_day - timestamp) > 1) |>
+  transmute(start = timestamp, end = next_day) |>
+  pmap_dfr(function(start, end) {
+    data.frame(
+      holiday      = "intersession",
+      ds           = seq.Date(start + 1, end - 1, by = "day"),
+      lower_window = 0,
+      upper_window = 0
+    )
+  }) |>
+  filter(ds <= max(df_train$ds))
+
+holidays_train_sem <- train_data |>
+  distinct(term, start_date, census_date) |>
+  filter(!is.na(start_date), !is.na(census_date)) |>
+  rowwise() |>
+  mutate(ds = list(seq.Date(as.Date(start_date), as.Date(census_date), by = "day"))) |>
+  unnest(ds) |>
+  transmute(holiday = "in_session", ds, lower_window = 0, upper_window = 0)
+
+
+# 2) Builder functions without ellipses
+build_default <- function(df) {
+  prophet(df, 
+          daily.seasonality = FALSE)
+}
+
+build_strict <- function(df) {
+  prophet(
+    df,
+    holidays                = holidays_train_strict,
+    holidays.prior.scale    = 20,
+    yearly.seasonality      = TRUE,
+    weekly.seasonality      = TRUE,
+    daily.seasonality       = FALSE,
+    n.changepoints          = 25,
+    changepoint.prior.scale = 0.05
+  )
+}
+
+build_semester <- function(df) {
+  prophet(
+    df,
+    holidays                = holidays_train_sem,
+    holidays.prior.scale    = 20,
+    yearly.seasonality      = TRUE,
+    weekly.seasonality      = TRUE,
+    daily.seasonality       = FALSE,
+    n.changepoints          = 25,
+    changepoint.prior.scale = 0.05
+  )
+}
+
+
+# 3) Fast walk-forward evaluator up to H days ahead
+walk_forward_fast <- function(build_fn, model_name, H = 6) {
+  n_test <- nrow(df_test)
+  N_fit  <- n_test - H
+  
+  errs   <- matrix(NA_real_, N_fit, H)
+  smapes <- matrix(NA_real_, N_fit, H)
+  covers <- matrix(FALSE,     N_fit, H)
+  
+  for (i in seq_len(N_fit)) {
+    train_i <- bind_rows(df_train, df_test[1:i, ])
+    m_i     <- build_fn(train_i)
+    future_ds <- df_test$ds[(i+1):(i+H)]
+    fc        <- predict(m_i, tibble(ds = future_ds))
+    
+    y_true <- df_test$y[(i+1):(i+H)]
+    yhat   <- fc$yhat
+    lo     <- fc$yhat_lower
+    hi     <- fc$yhat_upper
+    err    <- yhat - y_true
+    
+    errs[i, ]   <- err
+    smapes[i, ] <- 2 * abs(err)/(abs(yhat) + abs(y_true))
+    covers[i, ] <- (y_true >= lo & y_true <= hi)
+  }
+  
+  tibble(
+    model   = model_name,
+    horizon = 1:H,
+    rmse    = apply(errs,   2, function(e) sqrt(mean(e^2,   na.rm=TRUE))),
+    smape   = apply(smapes, 2, function(s) mean(s,          na.rm=TRUE)),
+    coverage= apply(covers, 2, function(c) mean(c,           na.rm=TRUE))
+  )
+}
+
+# 4) Run for H = 6
+stats_default <- walk_forward_fast(build_default,  "default",  H = 6)
+stats_strict  <- walk_forward_fast(build_strict,   "strict",   H = 6)
+stats_sem     <- walk_forward_fast(build_semester,"semester", H = 6)
+
+# 5) Combine and view
+all_stats <- bind_rows(stats_default, stats_strict, stats_sem)
+all_stats
+```
+
+[**All falls predict Fall 2024**]{.underline}
+
+walk‐forward procedure is doing is:
+
+1.  **Isolate the fall semesters**
+
+    We pull out only the Fall‐term enrollment curves over multiple years, then set aside the very last Fall (2024) as our “unseen” test period.
+
+2.  **Train–test split**
+
+    – **Training set:** all Fall terms before 2024
+
+    – **Test set:** the day‐by‐day enrollments during Fall 2024
+
+3.  **Sequential (walk-forward) retraining**
+
+    Instead of fitting once on the entire training set and naively forecasting the whole test period, we **re-fit** the model every time a new day of Fall 2024 arrives. That mirrors how you’d run this in production—each evening you’d add that day’s true enrollment, retrain, then forecast ahead.
+
+4.  **Multi-horizon forecasts**
+
+    At each retraining step i, we ask “what does the model predict for 1 day ahead? 2 days ahead? … up to H days ahead?”
+
+    Internally, we call Prophet’s predict() once per retrain on the next H dates.
+
+5.  **Error metrics per horizon**
+
+    For each horizon $h\in\{1,\dots,H\}$, we collect:
+
+    -   **RMSE** (in students): the root‐mean‐square of $\hat y - y$ across all those step-h forecasts
+
+    -   **sMAPE**: a scale-invariant “percent” error
+
+    -   **Coverage**: the fraction of true enrollments that fell inside the model’s prediction interval (here 90%)
+
+6.  **Summarize over the whole test run**
+
+    By aggregating each horizon’s errors over all retraining steps, we get one RMSE, sMAPE and coverage value for “1 day ahead,” another for “2 days ahead,” etc.
+
+**Why this matters:**
+
+-   It replicates your real‐world workflow of daily retraining as new enrollments come in.
+
+-   It shows how point‐forecast accuracy and interval reliability degrade the further ahead you go.
+
+-   It gives you actionable numbers like “expect ±8 students of RMSE at 1 day lead, ±11 at 7 days lead” and “only \~60% of actuals will lie inside our 90% intervals by 7 days out.”
+
+```{r}
+# 1. Prepare fall‐only data with real dates and term labels
+fall_all <- calc1_data_fall |>
+  mutate(
+    ds = as.Date(timestamp),
+    y  = total_of_enrollments
+  )
+
+# 2. Split into train (all Falls before 2024) and test (Fall 2024)
+fall_train <- fall_all |> filter(!str_detect(term, "2024"))
+fall_test  <- fall_all |> filter( str_detect(term, "2024"))
+
+df_train <- fall_train |> select(ds, y)
+df_test  <- fall_test  |> select(ds, y)
+
+# 3. Builder for the simple Fall-only Prophet model
+build_fall <- function(df) {
+  prophet(
+    df,
+    daily.seasonality = FALSE,
+    interval.width = 0.90
+  )
+}
+
+# 4. Fast walk-forward evaluator up to H days ahead
+walk_forward_fast <- function(build_fn, model_name, H = 6, df_test, df_train) {
+  n_test <- nrow(df_test)
+  N_fit  <- n_test - H
+  
+  errs   <- matrix(NA_real_, N_fit, H)
+  smapes <- matrix(NA_real_, N_fit, H)
+  covers <- matrix(FALSE,     N_fit, H)
+  
+  for (i in seq_len(N_fit)) {
+    # a) Train on all previous Falls + first i days of Fall 2024
+    train_i <- bind_rows(df_train, df_test[1:i, ])
+    m_i     <- build_fn(train_i)
+    
+    # b) Forecast the next H days of Fall 2024
+    future_ds <- df_test$ds[(i+1):(i+H)]
+    fc        <- predict(m_i, tibble(ds = future_ds))
+    
+    # c) Compute errors, sMAPE, and coverage
+    y_true <- df_test$y[(i+1):(i+H)]
+    yhat   <- fc$yhat
+    lo     <- fc$yhat_lower
+    hi     <- fc$yhat_upper
+    err    <- yhat - y_true
+    
+    errs[i, ]   <- err
+    smapes[i, ] <- 2 * abs(err) / (abs(yhat) + abs(y_true))
+    covers[i, ] <- (y_true >= lo & y_true <= hi)
+  }
+  
+  # d) Summarize by horizon
+  tibble(
+    model    = model_name,
+    horizon  = 1:H,
+    rmse     = apply(errs,   2, function(e) sqrt(mean(e^2, na.rm = TRUE))),
+    smape    = apply(smapes, 2, function(s) mean(s,    na.rm = TRUE)),
+    coverage = apply(covers, 2, function(x) mean(x,    na.rm = TRUE))
+  )
+}
+
+# 5. Run for H = 30 days (or fewer if Fall 2024 is shorter)
+H <- 15
+fall_stats <- walk_forward_fast(build_fall, "fall", H, df_test, df_train)
+
+fall_stats
+```
+
+The model where Fall predicts Fall has the lowest RMSE metrics
+
+## Model creation for Math for Liberal Arts
+
+```{r}
+math_for_liberal_fall <- math_for_liberal_data|> 
+  filter(str_detect(term, regex("Fall", ignore_case = TRUE)))
+```
+
+```{r}
+df_fall_prophet_math_liberal <- math_for_liberal_fall |>
+  transmute(ds = as.Date(timestamp), y = total_of_enrollments)
+
+m_fall <- prophet(
+  df_fall_prophet_math_liberal,
+  daily.seasonality = FALSE,
+  interval.width = 0.9
+)
+
+future_fall   <- make_future_dataframe(m_fall, periods = 1)
+forecast_fall <- predict(m_fall, future_fall)
+
+
+plot(m_fall, forecast_fall) +
+  ggtitle("Tuned Prophet on Multi‑Year Fall Data")
+
+prophet_plot_components(m_fall, forecast_fall)
+```
+
+```{r}
+fall_all_liberal <- math_for_liberal_fall |>
+  mutate(
+    ds = as.Date(timestamp),
+    y  = total_of_enrollments
+  )
+
+# 2. Split into train (all Falls before 2024) and test (Fall 2024)
+fall_train_liberal <- fall_all_liberal |> filter(!str_detect(term, "2024"))
+fall_test_liberal  <- fall_all_liberal |> filter( str_detect(term, "2024"))
+
+df_train_liberal <- fall_train_liberal |> select(ds, y)
+df_test_liberal  <- fall_test_liberal  |> select(ds, y)
+
+# Run for H = 30 days
+H <- 15
+fall_liberal_stats <- walk_forward_fast(build_fall, "fall_liberal", H, df_train_liberal, df_test_liberal)
+
+fall_liberal_stats
+```
+
+## Model creation for Intro to Stats
+
+```{r}
+intro_stats_data_fall <- intro_stats_data |> 
+  filter(str_detect(term, regex("Fall", ignore_case = TRUE)))
+```
+
+```{r}
+df_fall_prophet_stats <- intro_stats_data_fall |>
+  transmute(ds = as.Date(timestamp), y = total_of_enrollments)
+
+m_fall <- prophet(
+  df_fall_prophet_stats,
+  daily.seasonality = FALSE,
+  interval.width = 0.9
+)
+
+
+future_fall   <- make_future_dataframe(m_fall, periods = 1)
+forecast_fall <- predict(m_fall, future_fall)
+
+
+plot(m_fall, forecast_fall) +
+  ggtitle("Tuned Prophet on Multi‑Year Fall Data")
+
+prophet_plot_components(m_fall, forecast_fall)
+```
+
+```{r}
+fall_all_stats <- intro_stats_data_fall |>
+  mutate(
+    ds = as.Date(timestamp),
+    y  = total_of_enrollments
+  )
+
+# 2. Split into train (all Falls before 2024) and test (Fall 2024)
+fall_train_stats <- fall_all_stats |> filter(!str_detect(term, "2024"))
+fall_test_stats  <- fall_all_stats |> filter( str_detect(term, "2024"))
+
+df_train_stats <- fall_train_stats |> select(ds, y)
+df_test_stats  <- fall_test_stats  |> select(ds, y)
+
+# Run for H = 30 days
+H <- 15
+fall_stats_stat <- walk_forward_fast(build_fall, "fall_stats", H, df_train_stats, df_test_stats)
+
+fall_stats_stat
+```
+
+## Model creation for Calculus II
+
+```{r}
+calc2_data_fall <- calc2_data |> 
+  filter(str_detect(term, regex("Fall", ignore_case = TRUE)))
+```
+
+```{r}
+df_fall_prophet_calc2 <- calc2_data_fall |>
+  transmute(ds = as.Date(timestamp), y = total_of_enrollments)
+
+m_fall <- prophet(
+  df_fall_prophet_calc2,
+  daily.seasonality = FALSE,
+  interval.width = 0.9
+)
+
+
+future_fall   <- make_future_dataframe(m_fall, periods = 1)
+forecast_fall <- predict(m_fall, future_fall)
+
+
+plot(m_fall, forecast_fall) +
+  ggtitle("Tuned Prophet on Multi‑Year Fall Data")
+
+prophet_plot_components(m_fall, forecast_fall)
+```
+
+```{r}
+fall_all_calc2 <- calc2_data_fall |>
+  mutate(
+    ds = as.Date(timestamp),
+    y  = total_of_enrollments
+  )
+
+# 2. Split into train (all Falls before 2024) and test (Fall 2024)
+fall_train_calc2 <- fall_all_calc2 |> filter(!str_detect(term, "2024"))
+fall_test_calc2  <- fall_all_calc2 |> filter( str_detect(term, "2024"))
+
+df_train_calc2 <- fall_train_calc2 |> select(ds, y)
+df_test_calc2  <- fall_test_calc2  |> select(ds, y)
+
+# Run for H = 30 days
+H <- 15
+fall_calc2_stats <- walk_forward_fast(build_fall, "fall_calc2", H, df_train_calc2, df_test_calc2)
+
+fall_calc2_stats
+```
+
+## Model creation for Finite Math
+
+```{r}
+finite_math_fall <- finite_math |> 
+  filter(str_detect(term, regex("Fall", ignore_case = TRUE)))
+```
+
+```{r}
+df_fall_prophet_finite_math <- finite_math_fall |>
+  transmute(ds = as.Date(timestamp), y = total_of_enrollments)
+
+m_fall <- prophet(
+  df_fall_prophet_finite_math,
+  daily.seasonality = FALSE,
+  interval.width = 0.9
+)
+
+
+future_fall   <- make_future_dataframe(m_fall, periods = 1)
+forecast_fall <- predict(m_fall, future_fall)
+
+
+plot(m_fall, forecast_fall) +
+  ggtitle("Tuned Prophet on Multi‑Year Fall Data")
+
+prophet_plot_components(m_fall, forecast_fall)
+```
+
+```{r}
+fall_all_finite_math <- finite_math_fall |>
+  mutate(
+    ds = as.Date(timestamp),
+    y  = total_of_enrollments
+  )
+
+# 2. Split into train (all Falls before 2024) and test (Fall 2024)
+fall_train_finite_math <- fall_all_finite_math |> filter(!str_detect(term, "2024"))
+fall_test_finite_math  <- fall_all_finite_math |> filter( str_detect(term, "2024"))
+
+df_train_finite_math <- fall_train_finite_math |> select(ds, y)
+df_test_finite_math  <- fall_test_finite_math  |> select(ds, y)
+
+# Run for H = 30 days
+H <- 15
+fall_finite_math_stats <- walk_forward_fast(build_fall, "fall_finite_math", H, df_train_finite_math, df_test_finite_math)
+
+fall_finite_math_stats
+```
+
+## Model creation for College of Algebra
+
+```{r}
+college_algebra_data_fall <- college_algebra_data |> 
+  filter(str_detect(term, regex("Fall", ignore_case = TRUE)))
+```
+
+```{r}
+df_fall_prophet_algebra <- college_algebra_data_fall |>
+  transmute(ds = as.Date(timestamp), y = total_of_enrollments)
+
+m_fall <- prophet(
+  df_fall_prophet_algebra,
+  daily.seasonality = FALSE,
+  interval.width = 0.9
+)
+
+
+future_fall   <- make_future_dataframe(m_fall, periods = 1)
+forecast_fall <- predict(m_fall, future_fall)
+
+
+plot(m_fall, forecast_fall) +
+  ggtitle("Tuned Prophet on Multi‑Year Fall Data")
+
+prophet_plot_components(m_fall, forecast_fall)
+```
+
+```{r}
+fall_all_algebra <- college_algebra_data_fall |>
+  mutate(
+    ds = as.Date(timestamp),
+    y  = total_of_enrollments
+  )
+
+# 2. Split into train (all Falls before 2024) and test (Fall 2024)
+fall_train_algebra <- fall_all_algebra |> filter(!str_detect(term, "2024"))
+fall_test_algebra  <- fall_all_algebra |> filter( str_detect(term, "2024"))
+
+df_train_algebra <- fall_train_algebra |> select(ds, y)
+df_test_algebra  <- fall_test_algebra  |> select(ds, y)
+
+# Run for H = 30 days
+H <- 15
+fall_algebra_stats <- walk_forward_fast(build_fall, "fall_algebra", H, df_train_algebra, df_test_algebra)
+
+fall_algebra_stats
+```
